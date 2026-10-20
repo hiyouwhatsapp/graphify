@@ -145,8 +145,27 @@ def _print_cloud_cta(out_dir: "Path") -> None:
 
 
 def _graph_root_for(gp: Path) -> Path:
-    """The analysed repo root for a graph file: <root>/<GRAPHIFY_OUT_NAME>/graph.json, else the file's own directory."""
+    """Resolve the source root, including graphs stored outside the repository."""
     from graphify.paths import GRAPHIFY_OUT_NAME
+
+    configured = Path(_GRAPHIFY_OUT)
+    # Keep the usual in-repo root derivation unchanged. Only follow the marker
+    # for the external output selected by this Graphify process.
+    if (
+        configured.is_absolute()
+        and gp.parent.name == GRAPHIFY_OUT_NAME
+        and gp.parent.resolve() == configured.resolve()
+    ):
+        marker = gp.parent / ".graphify_root"
+        try:
+            # This marker is written by extract/update. Don't read arbitrarily
+            # large or broken files when the graph path is user-supplied.
+            if marker.is_file() and marker.stat().st_size <= 4096:
+                root = Path(marker.read_text(encoding="utf-8-sig").strip())
+                if root.is_absolute() and root.is_dir():
+                    return root.resolve()
+        except (OSError, UnicodeError, ValueError):
+            pass
     return gp.parent.parent if gp.parent.name == GRAPHIFY_OUT_NAME else gp.parent
 
 
@@ -1532,7 +1551,7 @@ def dispatch_command(cmd: str) -> None:
         if len(sys.argv) < 3:
             print("Usage: graphify query \"<question>\" [--dfs] [--context C] [--seed X] [--budget N] [--graph path]", file=sys.stderr)
             sys.exit(1)
-        from graphify.serve import _QUERY_NO_MATCH, _query_graph_text
+        from graphify.serve import _QUERY_NO_MATCH, _is_ambiguity_refusal, _query_graph_text
         from graphify.security import sanitize_label
         from networkx.readwrite import json_graph
         from graphify import querylog
@@ -1664,7 +1683,9 @@ def dispatch_command(cmd: str) -> None:
         )
         _touch_query_stamp(gp)
         print(_result)
-        if _result == _QUERY_NO_MATCH:
+        if _is_ambiguity_refusal(_result):
+            sys.exit(EXIT_AMBIGUOUS)
+        if _result == _QUERY_NO_MATCH or _result.startswith("No unique node match for --seed:"):
             sys.exit(EXIT_NOT_FOUND)
     elif cmd == "affected":
         if len(sys.argv) < 3:
@@ -1723,8 +1744,7 @@ def dispatch_command(cmd: str) -> None:
         # (#2706). The graph is written to <root>/<GRAPHIFY_OUT_NAME>/graph.json,
         # so the root is the output dir's parent; a graph pointed at directly by
         # --graph falls back to its own directory.
-        from graphify.paths import GRAPHIFY_OUT_NAME
-        graph_root = gp.parent.parent if gp.parent.name == GRAPHIFY_OUT_NAME else gp.parent
+        graph_root = _graph_root_for(gp)
         print(
             format_affected(
                 graph,
